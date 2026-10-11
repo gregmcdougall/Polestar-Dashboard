@@ -20,6 +20,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -33,6 +34,10 @@ USER_AGENT = "polestar-dashboard/0.1 (personal use; github.com/pypolestar based)
 MATCH_TOLERANCE = 0.15
 # Start and end this close together = round trip; routing can't infer that
 ROUND_TRIP_M = 300
+# Parsed alternatives kept in memory (a commute is looked up on every request)
+MEMORY_CACHE_PAIRS = 256
+# SQLite's default limit on bound parameters is 999
+_LOOKUP_CHUNK = 500
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS route_alternatives (
@@ -74,7 +79,12 @@ class RouteInferrer:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
+        # pair_key -> parsed alternatives (None = no route), most recently used last
+        self._memory: OrderedDict[str, list[dict[str, Any]] | None] = OrderedDict()
+        # Bumped whenever a lookup result is stored; annotate() output depends on it
+        self.version = 0
         self._queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         self._queued: set[str] = set()
         self._task: asyncio.Task | None = None
@@ -100,11 +110,35 @@ class RouteInferrer:
 
     # ------------------------------------------------------------ cache
 
-    def _cached(self, key: str) -> sqlite3.Row | None:
-        with self._lock:
-            return self._conn.execute(
-                "SELECT * FROM route_alternatives WHERE pair_key = ?", [key]
-            ).fetchone()
+    def _remember(self, key: str, alternatives: list[dict[str, Any]] | None) -> None:
+        self._memory[key] = alternatives
+        self._memory.move_to_end(key)
+        while len(self._memory) > MEMORY_CACHE_PAIRS:
+            self._memory.popitem(last=False)
+
+    def _lookup(self, keys: set[str]) -> dict[str, list[dict[str, Any]] | None]:
+        """Cached alternatives for `keys` (None = no route); unknown keys are absent."""
+        found: dict[str, list[dict[str, Any]] | None] = {}
+        missing = []
+        for key in keys:
+            if key in self._memory:
+                self._memory.move_to_end(key)
+                found[key] = self._memory[key]
+            else:
+                missing.append(key)
+        for i in range(0, len(missing), _LOOKUP_CHUNK):
+            chunk = missing[i : i + _LOOKUP_CHUNK]
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT pair_key, status, alternatives FROM route_alternatives "
+                    f"WHERE pair_key IN ({', '.join('?' for _ in chunk)})",
+                    chunk,
+                ).fetchall()
+            for row in rows:
+                alts = json.loads(row["alternatives"]) if row["alternatives"] else None
+                self._remember(row["pair_key"], alts)
+                found[row["pair_key"]] = alts
+        return found
 
     def _store(self, key: str, status: str, alternatives: list[dict] | None) -> None:
         with self._lock:
@@ -113,25 +147,31 @@ class RouteInferrer:
                 [key, status, json.dumps(alternatives) if alternatives else None, int(time.time())],
             )
             self._conn.commit()
+        self._remember(key, alternatives if status == "ok" else None)
+        self.version += 1
 
     # ------------------------------------------------------------ public
 
     def annotate(self, vin: str, trips: list[dict[str, Any]]) -> None:
-        """Attach cached inferred routes to trips; queue the missing ones."""
+        """Attach cached inferred routes to trips; queue the missing ones.
+
+        Must run on the event loop thread (it feeds an asyncio.Queue).
+        """
+        keyed = []
         for t in trips:
             t["route_source"] = "gps" if t.get("points", 0) > 2 else "endpoints"
-            if not needs_inference(t):
-                continue
-            key = pair_key(t)
-            row = self._cached(key)
-            if row is None:
+            if needs_inference(t):
+                keyed.append((pair_key(t), t))
+        cached = self._lookup({key for key, _ in keyed})
+        for key, t in keyed:
+            if key not in cached:
                 t["route_source"] = "pending"
                 if key not in self._queued:
                     self._queued.add(key)
                     self._queue.put_nowait((key, t))
-            elif row["status"] == "ok":
+            elif cached[key]:
                 target_m = t["distance_km"] * 1000 if t.get("distance_source") == "odometer" else None
-                best = choose_route(json.loads(row["alternatives"]), target_m)
+                best = choose_route(cached[key], target_m)
                 t["route"] = best["latlngs"]
                 t["route_source"] = "inferred"
                 t["route_distance_km"] = round(best["distance"] / 1000, 1)

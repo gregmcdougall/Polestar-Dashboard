@@ -14,6 +14,7 @@ last-parked positions over the same gRPC channel; see location.py.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import random
@@ -103,8 +104,10 @@ class LiveSource:
 
         # Fetch both: on some Polestar 2 software versions last-known goes stale
         # while last-parked keeps updating, so the newer of the two wins.
-        known = await self.location.last_known(vin)
-        parked = await self.location.last_parked(vin)
+        # Independent unary calls on one HTTP/2 channel: run them concurrently.
+        known, parked = await asyncio.gather(
+            self.location.last_known(vin), self.location.last_parked(vin)
+        )
         location = summarize(
             known,
             parked,

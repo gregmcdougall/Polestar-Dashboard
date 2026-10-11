@@ -9,6 +9,17 @@
   const PAD = { top: 12, right: 12, bottom: 24, left: 40 };
   const tooltip = () => document.getElementById("tooltip");
 
+  /** Run `fn` at most once per animation frame, with the latest arguments. */
+  function perFrame(fn) {
+    let raf = 0, args = null;
+    const run = (...a) => {
+      args = a;
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; fn(...args); });
+    };
+    run.cancel = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+    return run;
+  }
+
   function el(tag, attrs = {}, parent) {
     const node = document.createElementNS(NS, tag);
     for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
@@ -99,15 +110,19 @@
       fig.append(head, body);
       fig._title = titleText; fig._sub = sub; fig._body = body;
       if (window.Collapse && fig.id) window.Collapse.bind(fig, h3, fig.id);
-      new ResizeObserver(() => fig._render && fig._render()).observe(body);
+      // Only a width change needs a redraw (the chart's height is fixed)
+      new ResizeObserver(() => {
+        if (fig._render && body.clientWidth !== fig._drawnWidth) fig._render();
+      }).observe(body);
     }
     fig._title.textContent = opts.title;
     fig._sub.textContent = opts.sub || "";
     fig._render = () => {
       const body = fig._body;
       body.replaceChildren();
-      if (fig._mode === "table") return renderTable(body, opts, tableRows());
       const width = body.clientWidth;
+      fig._drawnWidth = width || null;
+      if (fig._mode === "table") return renderTable(body, opts, tableRows());
       if (!width) return;
       drawChart(body, width);
     };
@@ -232,9 +247,14 @@
       const hit = el("rect", { x: PAD.left, y: 0, width: iw, height: HEIGHT, fill: "transparent", tabindex: 0 }, svg);
 
       const nearest = (tx) => {
-        let best = valid[0], bd = Infinity;
-        for (const p of valid) { const dd = Math.abs(+p.t - tx); if (dd < bd) { bd = dd; best = p; } }
-        return best;
+        // valid is in time order: binary search, then pick the closer neighbour
+        let lo = 0, hi = valid.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (+valid[mid].t < tx) lo = mid + 1; else hi = mid;
+        }
+        const prev = valid[lo - 1];
+        return prev && Math.abs(+prev.t - tx) <= Math.abs(+valid[lo].t - tx) ? prev : valid[lo];
       };
       const show = (p, clientX, clientY) => {
         hair.setAttribute("x1", x(p.t)); hair.setAttribute("x2", x(p.t));
@@ -243,13 +263,14 @@
         dot.setAttribute("visibility", "visible");
         showTooltip(clientX, clientY, fmtFull(p.t), [{ color: opts.color, value: fmt(p.v), name: opts.valueLabel || opts.title }]);
       };
-      const hide = () => { hair.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTooltip(); };
-      hit.addEventListener("pointermove", (e) => {
+      const track = perFrame((clientX, clientY) => {
         const r = svg.getBoundingClientRect();
-        const sx = ((e.clientX - r.left) / r.width) * width;
+        const sx = ((clientX - r.left) / r.width) * width;
         const t = t0 + ((sx - PAD.left) / iw) * (t1 - t0);
-        show(nearest(t), e.clientX, e.clientY);
+        show(nearest(t), clientX, clientY);
       });
+      const hide = () => { track.cancel(); hair.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTooltip(); };
+      hit.addEventListener("pointermove", (e) => track(e.clientX, e.clientY));
       hit.addEventListener("pointerleave", hide);
       let kbIndex = valid.length - 1;
       hit.addEventListener("focus", () => {
@@ -306,13 +327,13 @@
           el("text", { x: cx, y: HEIGHT - 6, "text-anchor": "middle" }, svg).textContent = it.short;
         }
         const hit = el("rect", { x: PAD.left + slot * i, y: PAD.top, width: slot, height: ih, fill: "transparent", tabindex: 0 }, svg);
-        const on = (e) => {
+        const on = perFrame((clientX, clientY) => {
           if (bar) bar.setAttribute("fill-opacity", 0.75);
           const rect = hit.getBoundingClientRect();
-          showTooltip(e?.clientX ?? rect.left + rect.width / 2, e?.clientY ?? rect.top + 20, it.label, [{ color: opts.color, value: fmt(v), name: opts.valueLabel || "" }]);
-        };
-        const off = () => { if (bar) bar.removeAttribute("fill-opacity"); hideTooltip(); };
-        hit.addEventListener("pointermove", on);
+          showTooltip(clientX ?? rect.left + rect.width / 2, clientY ?? rect.top + 20, it.label, [{ color: opts.color, value: fmt(v), name: opts.valueLabel || "" }]);
+        });
+        const off = () => { on.cancel(); if (bar) bar.removeAttribute("fill-opacity"); hideTooltip(); };
+        hit.addEventListener("pointermove", (e) => on(e.clientX, e.clientY));
         hit.addEventListener("pointerleave", off);
         hit.addEventListener("focus", () => on());
         hit.addEventListener("blur", off);

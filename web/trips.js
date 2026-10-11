@@ -18,6 +18,8 @@
     tiles: null,
     theme: null,
     layers: null,     // all-trip routes
+    lines: new Map(), // trip id -> route polyline in `layers`
+    bounds: null,     // all routes + car
     focus: null,      // selected trip layers
     carMarker: null,
     trips: [],
@@ -81,22 +83,20 @@
     $("map").classList.toggle("map-dark", theme === "dark");
   }
 
+  /** Full rebuild: trips, theme or units changed. */
   function draw() {
     const map = ensureMap();
     if (!map) return;
     state.layers.clearLayers();
-    state.focus.clearLayers();
+    state.lines = new Map();
     const routeColor = css("--series-1");
-    const accent = css("--accent");
     const bounds = L.latLngBounds([]);
 
     for (const t of state.trips) {
-      const selected = state.selected === t.id;
       // Start and end only (no route from the car, none inferred yet): draw dotted
       const line = L.polyline(t.route, {
+        ...lineStyle(t),
         color: routeColor,
-        weight: selected ? 0 : 3,
-        opacity: state.selected ? 0.25 : 0.6,
         lineJoin: "round",
         dashArray: straightOnly(t) ? "2 8" : null,
         lineCap: "round",
@@ -106,20 +106,8 @@
       hit.on("click", (e) => { L.DomEvent.stopPropagation(e); select(t.id, true); });
       hit.bindTooltip(tripLabel(t), { sticky: true, className: "trip-tip" });
       state.layers.addLayer(line).addLayer(hit);
-      t.route.forEach((p) => bounds.extend(p));
-    }
-
-    const sel = state.trips.find((t) => t.id === state.selected);
-    if (sel) {
-      const dash = straightOnly(sel) ? "1 10" : null;
-      L.polyline(sel.route, { color: css("--surface"), weight: 8, opacity: 0.9, lineJoin: "round", lineCap: "round", dashArray: dash }).addTo(state.focus);
-      L.polyline(sel.route, { color: accent, weight: 5, opacity: 1, lineJoin: "round", lineCap: "round", dashArray: dash }).addTo(state.focus);
-      L.circleMarker(sel.route[0], { radius: 6, color: "#fff", weight: 2, fillColor: css("--good"), fillOpacity: 1 })
-        .bindTooltip("Start").addTo(state.focus);
-      if (!sel.ongoing) {
-        L.circleMarker(sel.route[sel.route.length - 1], { radius: 6, color: "#fff", weight: 2, fillColor: css("--text"), fillOpacity: 1 })
-          .bindTooltip("End").addTo(state.focus);
-      }
+      state.lines.set(t.id, line);
+      bounds.extend(L.latLngBounds(t.route));
     }
 
     // Car
@@ -134,15 +122,43 @@
       }).bindTooltip(driving ? "Driving" : "Parked here").addTo(map);
       bounds.extend([cur.lat, cur.lon]);
     }
+    state.bounds = bounds;
+    drawSelection();
+  }
+
+  function lineStyle(t) {
+    return { weight: state.selected === t.id ? 0 : 3, opacity: state.selected ? 0.25 : 0.6 };
+  }
+
+  /** Selection changed: restyle existing routes and redraw only the highlighted one. */
+  function drawSelection() {
+    const map = state.map;
+    if (!map) return;
+    state.focus.clearLayers();
+    for (const t of state.trips) state.lines.get(t.id)?.setStyle(lineStyle(t));
+
+    const sel = state.trips.find((t) => t.id === state.selected);
+    if (sel) {
+      const accent = css("--accent");
+      const dash = straightOnly(sel) ? "1 10" : null;
+      L.polyline(sel.route, { color: css("--surface"), weight: 8, opacity: 0.9, lineJoin: "round", lineCap: "round", dashArray: dash }).addTo(state.focus);
+      L.polyline(sel.route, { color: accent, weight: 5, opacity: 1, lineJoin: "round", lineCap: "round", dashArray: dash }).addTo(state.focus);
+      L.circleMarker(sel.route[0], { radius: 6, color: "#fff", weight: 2, fillColor: css("--good"), fillOpacity: 1 })
+        .bindTooltip("Start").addTo(state.focus);
+      if (!sel.ongoing) {
+        L.circleMarker(sel.route[sel.route.length - 1], { radius: 6, color: "#fff", weight: 2, fillColor: css("--text"), fillOpacity: 1 })
+          .bindTooltip("End").addTo(state.focus);
+      }
+    }
 
     // Fit: on selection, or the first time a given data set appears.
     if (sel) {
       map.fitBounds(L.latLngBounds(sel.route), { padding: [40, 40], maxZoom: 16 });
     } else {
       const key = `${state.trips.length}:${state.trips[0]?.id || ""}`;
-      if (bounds.isValid() && key !== state.fittedKey) {
+      if (state.bounds.isValid() && key !== state.fittedKey) {
         state.fittedKey = key;
-        map.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+        map.fitBounds(state.bounds, { padding: [30, 30], maxZoom: 15 });
       }
     }
   }
@@ -160,8 +176,10 @@
   /* ---------------- list ---------------- */
   function select(id, fromMap) {
     state.selected = state.selected === id && !fromMap ? null : id;
-    renderList();
-    draw();
+    for (const b of $("trip-list").querySelectorAll(".trip-item")) {
+      b.setAttribute("aria-pressed", String(b.dataset.id === state.selected));
+    }
+    drawSelection();
     if (fromMap && id) {
       document.querySelector(`.trip-item[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
     }
@@ -301,5 +319,5 @@
     state.fittedKey = null;
   }
 
-  window.Trips = { update, reset, rerender };
+  window.Trips = { update, reset, rerender, refreshChip: renderChip };
 })();
