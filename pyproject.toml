@@ -1,0 +1,19 @@
+[project]
+name = "polestar-dashboard"
+version = "0.1.0"
+description = "Standalone Polestar dashboard (no Home Assistant) built on pypolestar"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pypolestar==1.12.7",
+    "backoff>=2.2",  # imported by pypolestar but not declared as a dependency
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100

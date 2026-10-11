@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polestar Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 L19 13 L30 16 L19 19 L16 30 L13 19 L2 16 L13 13 Z' fill='%23d96c00'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 L19 13 L30 16 L19 19 L16 30 L13 19 L2 16 L13 13 Z"/></svg>
+      <span>Polestar</span>
+    </div>
+    <select id="car-select" class="car-select" aria-label="Select car" hidden></select>
+    <div class="topbar-right">
+      <span id="status-pill" class="pill" role="status">Connecting…</span>
+      <span id="updated" class="muted small"></span>
+      <div class="segmented segmented-sm" role="radiogroup" aria-label="Distance units" id="units-picker">
+        <button type="button" role="radio" data-units="mi" aria-checked="true">mi</button>
+        <button type="button" role="radio" data-units="km" aria-checked="false">km</button>
+      </div>
+      <button id="refresh-btn" class="icon-btn" type="button" title="Refresh now" aria-label="Refresh now">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="empty" class="empty" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="empty-text">Signing in to Polestar and fetching your car…</p>
+    </section>
+
+    <div id="dashboard" hidden>
+      <!-- Hero: car + battery -->
+      <section class="hero card">
+        <div class="hero-car">
+          <div class="car-title">
+            <h1 id="model-name">—</h1>
+            <p class="muted"><span id="model-year"></span><span id="reg" class="reg"></span></p>
+          </div>
+          <div class="car-stage">
+            <img id="car-image" alt="" draggable="false">
+          </div>
+          <div class="angle-picker" id="angle-picker" role="group" aria-label="Car view angle"></div>
+        </div>
+
+        <div class="hero-battery">
+          <div class="soc-row">
+            <div>
+              <div class="label">Battery</div>
+              <div class="hero-number"><span id="soc">—</span><span class="unit">%</span></div>
+            </div>
+            <div class="range-block">
+              <div class="label">Est. range</div>
+              <div class="big-number"><span id="range">—</span><span class="unit u-dist">mi</span></div>
+            </div>
+          </div>
+
+          <div class="battery-bar" id="battery-bar" role="img" aria-label="Battery level">
+            <div class="battery-fill" id="battery-fill"></div>
+            <div class="battery-target" id="battery-target" hidden><span id="battery-target-label"></span></div>
+          </div>
+          <div class="battery-scale muted small"><span>0</span><span>50</span><span>100%</span></div>
+
+          <div class="charge-status" id="charge-status">
+            <span class="status-dot" id="charge-dot"></span>
+            <span id="charge-text">—</span>
+          </div>
+
+          <dl class="kv-grid" id="charge-details"></dl>
+        </div>
+      </section>
+
+      <!-- Stat tiles -->
+      <section class="tiles">
+        <div class="tile card" data-collapsible><div class="label" data-collapse="tile-odometer">Odometer</div><div class="tile-value collapse-body"><span id="odometer">—</span><span class="unit u-dist">mi</span></div></div>
+        <div class="tile card" data-collapsible><div class="label" data-collapse="tile-consumption">Avg. consumption</div><div class="tile-value collapse-body"><span id="consumption">—</span><span class="unit u-consumption">kWh/100 mi</span></div></div>
+        <div class="tile card" data-collapsible><div class="label" data-collapse="tile-full-range">Full-charge range</div><div class="tile-value collapse-body"><span id="full-range">—</span><span class="unit u-dist">mi</span></div></div>
+        <div class="tile card" data-collapsible><div class="label" data-collapse="tile-service">Next service</div><div class="tile-value collapse-body"><span id="service-days">—</span><span class="unit">days</span></div><div class="muted small collapse-body" id="service-km"></div></div>
+      </section>
+
+      <!-- Trips -->
+      <section class="trips" data-collapsible>
+        <div class="section-head">
+          <h2 data-collapse="trips">Trips</h2>
+          <div class="segmented collapse-body" role="radiogroup" aria-label="Trip period" id="trip-range">
+            <button type="button" role="radio" data-days="7" aria-checked="true">7 days</button>
+            <button type="button" role="radio" data-days="30" aria-checked="false">30 days</button>
+            <button type="button" role="radio" data-days="90" aria-checked="false">90 days</button>
+          </div>
+        </div>
+        <div class="card trips-card collapse-body">
+          <div class="map-wrap">
+            <div id="map" aria-label="Map of trips"></div>
+            <div class="map-chip" id="map-chip" hidden></div>
+          </div>
+          <div class="trip-panel">
+            <div class="trip-summary" id="trip-summary"></div>
+            <ul class="trip-list" id="trip-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- History -->
+      <section class="history" data-collapsible>
+        <div class="section-head">
+          <h2 data-collapse="history">History</h2>
+          <div class="segmented collapse-body" role="radiogroup" aria-label="Time range" id="range-picker">
+            <button type="button" role="radio" data-hours="24" aria-checked="true">24 h</button>
+            <button type="button" role="radio" data-hours="168" aria-checked="false">7 days</button>
+            <button type="button" role="radio" data-hours="720" aria-checked="false">30 days</button>
+          </div>
+        </div>
+        <div class="chart-grid collapse-body">
+          <figure class="card chart-card" id="chart-soc"></figure>
+          <figure class="card chart-card" id="chart-range"></figure>
+          <figure class="card chart-card" id="chart-power"></figure>
+          <figure class="card chart-card" id="chart-distance"></figure>
+        </div>
+      </section>
+
+      <!-- Health + diagnostics -->
+      <section class="lower">
+        <div class="card" data-collapsible>
+          <h2 data-collapse="health">Vehicle health</h2>
+          <ul class="health-list collapse-body" id="health-list"></ul>
+        </div>
+        <div class="card" data-collapsible>
+          <h2 data-collapse="diagnostics">Details &amp; diagnostics</h2>
+          <dl class="kv-list collapse-body" id="diagnostics"></dl>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer muted small">
+    Unofficial. Data from Polestar's cloud API via <a href="https://github.com/pypolestar/pypolestar" target="_blank" rel="noopener">pypolestar</a>. Not affiliated with Polestar.
+  </footer>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="units.js"></script>
+  <script src="collapse.js"></script>
+  <script src="charts.js"></script>
+  <script src="trips.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

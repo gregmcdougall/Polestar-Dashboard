@@ -1,0 +1,30 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-demo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "python",
+        "-m",
+        "server",
+        "--demo",
+        "--port",
+        "8777"
+      ],
+      "port": 8777
+    },
+    {
+      "name": "dashboard-live",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "python",
+        "-m",
+        "server"
+      ],
+      "port": 8765
+    }
+  ]
+}
