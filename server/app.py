@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -21,6 +24,67 @@ from .sources import LiveSource
 from .trips import compute_trips
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# A manual refresh polls Polestar immediately; don't let a script hammer it
+REFRESH_MIN_INTERVAL_S = 15
+
+LOOPBACK_HOSTS = ["127.0.0.1", "localhost"]
+
+# Leaflet (cdnjs) and OSM tiles are the only third parties; car images come
+# from Polestar's CDN, whose host isn't fixed, hence https: for images.
+CSP = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self' https://cdnjs.cloudflare.com",
+        "style-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline'",
+        "img-src 'self' data: https:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ]
+)
+SECURITY_HEADERS = [
+    (b"content-security-policy", CSP.encode()),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    # OSM's tile servers require a Referer; this sends only the origin
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+    (b"cross-origin-opener-policy", b"same-origin"),
+    (b"cross-origin-resource-policy", b"same-origin"),
+]
+
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                message["headers"] = [*message["headers"], *SECURITY_HEADERS]
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+def _same_origin(request: Request) -> bool:
+    """Reject cross-site requests to state-changing endpoints (CSRF).
+
+    Browsers send Sec-Fetch-Site on every request and Origin on every POST;
+    non-browser clients (curl, service.sh) send neither and are allowed.
+    """
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        return site in ("same-origin", "none")
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    return origin.split("://", 1)[-1] == request.headers.get("host")
 
 
 def create_app(
@@ -32,6 +96,7 @@ def create_app(
     password: str | None = None,
     vins: list[str] | None = None,
     osrm_url: str | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> Starlette:
     history = History(db_path)
     routes = RouteInferrer(db_path, osrm_url)
@@ -114,7 +179,17 @@ def create_app(
             "location": (poller.snapshots.get(vin) or {}).get("location"),
         })
 
+    last_refresh = 0.0
+
     async def refresh(request: Request) -> JSONResponse:
+        nonlocal last_refresh
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request"}, status_code=403)
+        now = time.monotonic()
+        if now - last_refresh < REFRESH_MIN_INTERVAL_S:
+            # Not an error for the UI: a poll is already under way or just happened
+            return JSONResponse({"ok": True, "throttled": True})
+        last_refresh = now
         poller.refresh_now()
         return JSONResponse({"ok": True})
 
@@ -138,6 +213,12 @@ def create_app(
             Route("/api/trips", trips_endpoint),
             Route("/api/refresh", refresh, methods=["POST"]),
             Mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web"),
+        ],
+        middleware=[
+            # Rejects requests whose Host isn't ours, which defeats DNS rebinding
+            # (a web page re-pointing its own hostname at 127.0.0.1 to read the API)
+            Middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS),
+            Middleware(SecurityHeadersMiddleware),
         ],
         lifespan=lifespan,
     )
