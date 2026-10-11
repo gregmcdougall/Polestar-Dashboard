@@ -60,6 +60,14 @@ Settings in `.env`:
 | `POLESTAR_VIN` | Optional: limit to these cars (comma-separated) |
 | `POLESTAR_SCAN_INTERVAL` | Seconds between polls (default 60, minimum 30) |
 | `OSRM_URL` | Routing server for inferred trip routes (default: the public OSRM demo) |
+| `DASHBOARD_ALLOWED_HOSTS` | Extra host names the server answers to, comma-separated, e.g. a Tailscale name. Only needed with `--host` set to a non-loopback address (see below) |
+
+The server binds to `127.0.0.1` and only accepts requests addressed to `127.0.0.1` or
+`localhost`, which protects against DNS-rebinding attacks. To reach it from another device, start
+it with `--host` and list the names you'll use in `DASHBOARD_ALLOWED_HOSTS`. A specific bind
+address is allowed automatically; `0.0.0.0` is not. The dashboard has no login and shows your
+car's location history, so only expose it through a VPN or an authenticating proxy. The
+startup service always binds to `127.0.0.1`.
 
 ## Run at startup (macOS)
 
