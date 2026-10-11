@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
+    # The history DB is a log of where the car has been; keep it (and its WAL
+    # files) readable by this user only.
+    os.umask(0o077)
     load_dotenv(ROOT / ".env")
 
     parser = argparse.ArgumentParser(description="Standalone Polestar dashboard")
@@ -38,6 +41,19 @@ def main() -> None:
     vins = [v.strip() for v in os.getenv("POLESTAR_VIN", "").split(",") if v.strip()] or None
     interval = int(os.getenv("POLESTAR_SCAN_INTERVAL", "60") or 60)
     osrm_url = os.getenv("OSRM_URL", "").strip() or None
+    # Host names the dashboard may be reached by, beyond 127.0.0.1/localhost
+    # (e.g. a Tailscale name when binding --host to a non-loopback address)
+    extra_hosts = [h.strip() for h in os.getenv("DASHBOARD_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    loopback = args.host in ("127.0.0.1", "localhost", "::1")
+    allowed_hosts = ["127.0.0.1", "localhost", *extra_hosts]
+    if not loopback and args.host not in ("0.0.0.0", "::"):
+        allowed_hosts.append(args.host)
+    if not loopback:
+        logging.getLogger(__name__).warning(
+            "Binding to %s: the dashboard has no login, so anyone who can reach this address "
+            "can see the car's location history. Prefer 127.0.0.1 behind an authenticating "
+            "proxy or VPN.", args.host,
+        )
 
     if not args.demo and not (username and password):
         sys.exit(
@@ -60,6 +76,7 @@ def main() -> None:
         password=password,
         vins=vins,
         osrm_url=osrm_url,
+        allowed_hosts=allowed_hosts,
     )
 
     print(f"\n  Polestar dashboard → http://{args.host}:{args.port}\n", flush=True)

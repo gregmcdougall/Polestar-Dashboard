@@ -43,6 +43,8 @@ install() {
 
   (cd "$ROOT" && "$UV" sync --frozen --quiet)
   mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
+  touch "$LOG" && chmod 600 "$LOG"
+  chmod 600 "$ROOT/.env"
 
   cat >"$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
