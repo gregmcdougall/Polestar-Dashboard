@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -21,9 +26,14 @@ from .routing import RouteInferrer
 from .demo import DemoSource
 from .snapshot import history_row
 from .sources import LiveSource
-from .trips import compute_trips
+from .trips import SAMPLE_COLUMNS, STOP_GAP_S, compute_trips
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# Trips are computed from a little before the requested range so the first
+# trip in range has its origin.
+TRIP_LOOKBACK_S = 2 * 86400
+# Distinct ?days= values whose trips are kept cached (the UI uses three)
+TRIP_CACHE_RANGES = 8
 # A manual refresh polls Polestar immediately; don't let a script hammer it
 REFRESH_MIN_INTERVAL_S = 15
 
@@ -87,6 +97,11 @@ def _same_origin(request: Request) -> bool:
     return origin.split("://", 1)[-1] == request.headers.get("host")
 
 
+def _json_bytes(value: Any) -> bytes:
+    # Same encoding as Starlette's JSONResponse
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+
+
 def create_app(
     *,
     demo: bool,
@@ -141,13 +156,16 @@ def create_app(
     async def cars(request: Request) -> JSONResponse:
         return JSONResponse(list(poller.snapshots.values()))
 
+    # SQLite reads below run in the threadpool so a long range never stalls the
+    # event loop (and with it the poller and the live location stream).
+
     async def history_endpoint(request: Request) -> JSONResponse:
         vin = _vin(request)
         if vin is None:
             return JSONResponse([])
         hours = _int_param(request, "hours", 24, 1, 24 * 365)
         since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
-        return JSONResponse(history.query(vin, since))
+        return JSONResponse(await run_in_threadpool(history.query, vin, since))
 
     async def daily_endpoint(request: Request) -> JSONResponse:
         vin = _vin(request)
@@ -155,29 +173,73 @@ def create_app(
             return JSONResponse([])
         days = _int_param(request, "days", 14, 1, 365)
         since = datetime.now(tz=timezone.utc) - timedelta(days=days)
-        return JSONResponse(history.daily_distance(vin, since))
+        return JSONResponse(await run_in_threadpool(history.daily_distance, vin, since))
 
-    async def trips_endpoint(request: Request) -> JSONResponse:
+    # (vin, days) -> (inputs key, trips oldest first, un-annotated)
+    trip_cache: dict[tuple[str, int], tuple[tuple, list[dict[str, Any]]]] = {}
+    # (vin, days) -> (output key, encoded trips array, its digest)
+    trip_body_cache: dict[tuple[str, int], tuple[tuple, bytes, bytes]] = {}
+
+    def _base_trips(vin: str, days: int, now: float) -> tuple[tuple, list[dict[str, Any]]]:
+        """compute_trips() over the range, reused until its inputs change.
+
+        Its result depends on the stored data (versioned by History) and on
+        `now` only through whether the last position has settled into a stop.
+        The lookback is anchored to the hour so it stays put between polls.
+        """
+        lookback = int((now - days * 86400 - TRIP_LOOKBACK_S) // 3600 * 3600)
+        last_fix = history.last_position_ts(vin)
+        settled = last_fix is not None and now - last_fix >= STOP_GAP_S
+        key = (lookback, history.data_version(vin), settled)
+        hit = trip_cache.get((vin, days))
+        if hit and hit[0] == key:
+            return hit
+        since = datetime.fromtimestamp(lookback, tz=timezone.utc)
+        trips = compute_trips(
+            history.positions(vin, since),
+            history.sample_columns(vin, since, SAMPLE_COLUMNS),
+            now=now,
+        )
+        _bounded_put(trip_cache, (vin, days), entry := (key, trips))
+        return entry
+
+    async def trips_endpoint(request: Request) -> Response:
         vin = _vin(request)
         if vin is None:
             return JSONResponse({"trips": [], "location": None})
         days = _int_param(request, "days", 7, 1, 365)
-        now = datetime.now(tz=timezone.utc)
-        since = now - timedelta(days=days)
-        # Look back a little further so the first trip in range has its origin.
-        lookback = since - timedelta(days=2)
-        trips = compute_trips(
-            history.positions(vin, lookback),
-            history.samples(vin, lookback, ("odometer_m", "soc", "range_km")),
-            now=now.timestamp(),
+        now = time.time()
+        since = now - days * 86400
+        base_key, base = await run_in_threadpool(_base_trips, vin, days, now)
+        in_range = [t for t in base if (t["last_ts"] or 0) >= since]
+
+        # Ranges only shrink from the old end, so the count identifies the subset
+        out_key = (base_key, len(in_range), routes.version)
+        hit = trip_body_cache.get((vin, days))
+        if hit and hit[0] == out_key:
+            _, body, digest = hit
+        else:
+            trips = [dict(t) for t in in_range]  # annotate() writes into each trip
+            routes.annotate(vin, trips)
+            trips.reverse()  # newest first
+            body = _json_bytes(trips)
+            digest = hashlib.blake2b(body, digest_size=16).digest()
+            if any(t["route_source"] == "pending" for t in trips):
+                # annotate() must run again to re-queue lookups that failed
+                trip_body_cache.pop((vin, days), None)
+            else:
+                _bounded_put(trip_body_cache, (vin, days), (out_key, body, digest))
+
+        location = _json_bytes((poller.snapshots.get(vin) or {}).get("location"))
+        etag = 'W/"%s"' % hashlib.blake2b(digest + location, digest_size=12).hexdigest()
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(
+            b'{"trips":' + body + b',"location":' + location + b"}",
+            media_type="application/json",
+            headers=headers,
         )
-        trips = [t for t in trips if (t["last_ts"] or 0) >= since.timestamp()]
-        routes.annotate(vin, trips)
-        trips.reverse()  # newest first
-        return JSONResponse({
-            "trips": trips,
-            "location": (poller.snapshots.get(vin) or {}).get("location"),
-        })
 
     last_refresh = 0.0
 
@@ -219,6 +281,15 @@ def create_app(
             # (a web page re-pointing its own hostname at 127.0.0.1 to read the API)
             Middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS),
             Middleware(SecurityHeadersMiddleware),
+            # Trip routes are long, repetitive coordinate lists; gzip shrinks them ~10x
+            Middleware(GZipMiddleware, minimum_size=1024),
         ],
         lifespan=lifespan,
     )
+
+
+def _bounded_put(cache: dict, key: Any, value: Any) -> None:
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > TRIP_CACHE_RANGES:
+        cache.pop(next(iter(cache)))

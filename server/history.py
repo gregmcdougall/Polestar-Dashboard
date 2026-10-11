@@ -53,12 +53,30 @@ class History:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # Bumped whenever stored data changes in a way that can alter derived
+        # results (trips); lets callers cache work between polls.
+        self._versions: dict[str, int] = {}
+        self._last_values: dict[str, list[Any]] = {}
         with self._lock:
+            # WAL: readers (route cache connection, ad-hoc read-only tools) never
+            # block on the poller's writes, and NORMAL avoids an fsync per poll.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
+
+    def _bump(self, vin: str) -> None:
+        self._versions[vin] = self._versions.get(vin, 0) + 1
+
+    def data_version(self, vin: str) -> int:
+        return self._versions.get(vin, 0)
 
     def record(self, vin: str, row: dict[str, Any], ts: datetime | None = None) -> None:
         epoch = int((ts or datetime.now(tz=timezone.utc)).timestamp())
         values = [row.get(c) for c in COLUMNS]
+        # A poll that repeats the previous values adds a row but changes nothing derived
+        if values != self._last_values.get(vin):
+            self._last_values[vin] = values
+            self._bump(vin)
         with self._lock:
             self._conn.execute(
                 f"INSERT OR REPLACE INTO samples (vin, ts, {', '.join(COLUMNS)}) "
@@ -75,6 +93,8 @@ class History:
                 [[vin, int(ts.timestamp()), *[r.get(c) for c in COLUMNS]] for ts, r in rows],
             )
             self._conn.commit()
+        self._last_values.pop(vin, None)
+        self._bump(vin)
 
     def has_data(self, vin: str) -> bool:
         with self._lock:
@@ -137,7 +157,10 @@ class History:
                 rows,
             )
             self._conn.commit()
-            return self._conn.total_changes - before
+            added = self._conn.total_changes - before
+        if added:
+            self._bump(vin)
+        return added
 
     def positions(self, vin: str, since: datetime) -> list[dict[str, Any]]:
         with self._lock:
@@ -157,6 +180,34 @@ class History:
                 [vin, int(since.timestamp())],
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def sample_columns(
+        self, vin: str, since: datetime, columns: tuple[str, ...]
+    ) -> dict[str, list[Any]]:
+        """Unthinned samples as columns: {"ts": [...], column: [...]}.
+
+        Columnar tuples skip building a dict per row, which dominates the cost
+        once history spans months of one-minute polls.
+        """
+        cols = [c for c in columns if c in COLUMNS]
+        with self._lock:
+            cur = self._conn.execute(
+                f"SELECT ts, {', '.join(cols)} FROM samples WHERE vin = ? AND ts >= ? ORDER BY ts",
+                [vin, int(since.timestamp())],
+            )
+            cur.row_factory = None
+            rows = cur.fetchall()
+        names = ["ts", *cols]
+        if not rows:
+            return {n: [] for n in names}
+        return {n: list(col) for n, col in zip(names, zip(*rows))}
+
+    def last_position_ts(self, vin: str) -> int | None:
+        with self._lock:
+            (ts,) = self._conn.execute(
+                "SELECT MAX(ts) FROM positions WHERE vin = ?", [vin]
+            ).fetchone()
+        return ts
 
     def has_positions(self, vin: str) -> bool:
         with self._lock:

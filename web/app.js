@@ -454,10 +454,23 @@
     if (!force && Date.now() - state.lastTripsFetch < HISTORY_POLL_MS) return;
     state.lastTripsFetch = Date.now();
     try {
-      const data = await api(`/api/trips?vin=${encodeURIComponent(car.vin)}&days=${state.tripDays}`);
-      Trips.update(data, state.tripDays);
+      const path = `/api/trips?vin=${encodeURIComponent(car.vin)}&days=${state.tripDays}`;
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+      // The browser revalidates with the ETag; an unchanged response (same day,
+      // since list labels say "Today") needs no parsing or redrawing.
+      const etag = r.headers.get("ETag");
+      const tag = `${car.vin}|${state.tripDays}|${etag}|${new Date().toDateString()}`;
+      if (force || !etag || tag !== state.tripsTag) {
+        const data = await r.json();
+        state.tripsTag = tag;
+        state.tripsPending = !!data.trips?.some((t) => t.route_source === "pending");
+        Trips.update(data, state.tripDays);
+      } else {
+        Trips.refreshChip(); // "updated N min ago"
+      }
       // Routes are inferred in the background (1 request/s); check back soon
-      if (data.trips?.some((t) => t.route_source === "pending") && !state.tripsRetry) {
+      if (state.tripsPending && !state.tripsRetry) {
         state.tripsRetry = setTimeout(() => { state.tripsRetry = null; loadTrips(true); }, 3000);
       }
     } catch (e) {

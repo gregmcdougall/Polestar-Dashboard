@@ -19,6 +19,7 @@ import bisect
 import math
 import time
 from dataclasses import dataclass, field
+from itertools import compress
 from typing import Any
 
 STAY_RADIUS_M = 150
@@ -34,6 +35,8 @@ SETTLE_S = 10 * 60
 # quiet spell means it was parked, so a departure is the start of the unbroken
 # run of driving activity that leads up to arrival.
 QUIET_GAP_S = 30 * 60
+# Telemetry columns compute_trips() reads
+SAMPLE_COLUMNS = ("odometer_m", "soc", "range_km")
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -78,12 +81,13 @@ def _clusters(positions: list[dict[str, Any]]) -> list[Cluster]:
 
 
 class _Series:
-    """Time-indexed lookups over sample rows for one column."""
+    """Time-indexed lookups over one sample column (nulls dropped)."""
 
-    def __init__(self, samples: list[dict[str, Any]], column: str) -> None:
-        rows = [(s["ts"], s[column]) for s in samples if s.get(column) is not None]
-        self.ts = [r[0] for r in rows]
-        self.values = [r[1] for r in rows]
+    def __init__(self, samples: dict[str, list[Any]], column: str) -> None:
+        values = samples[column]
+        present = [v is not None for v in values]
+        self.ts = list(compress(samples["ts"], present))
+        self.values = list(compress(values, present))
 
     def at_or_before(self, ts: int) -> float | None:
         i = bisect.bisect_right(self.ts, ts) - 1
@@ -97,7 +101,7 @@ class _Series:
 
 
 
-def _activity_times(samples: list[dict[str, Any]]) -> list[int]:
+def _activity_times(samples: dict[str, list[Any]]) -> list[int]:
     """Timestamps of telemetry changes that indicate driving.
 
     Only the directions driving produces count: odometer up, SoC down, range
@@ -105,27 +109,25 @@ def _activity_times(samples: list[dict[str, Any]]) -> list[int]:
     ignored. On the Polestar 2 position fixes only arrive at parking, so this
     is what dates the departure.
     """
-    times = []
-    prev: dict[str, float] = {}
-    for s in samples:
-        moved = False
-        for col, sign in (("odometer_m", 1), ("soc", -1), ("range_km", -1)):
-            v = s.get(col)
+    moved = bytearray(len(samples["ts"]))
+    for col, sign in (("odometer_m", 1), ("soc", -1), ("range_km", -1)):
+        prev = None
+        for i, v in enumerate(samples[col]):
             if v is None:
                 continue
-            if col in prev and (v - prev[col]) * sign > 0:
-                moved = True
-            prev[col] = v
-        if moved:
-            times.append(s["ts"])
-    return times
+            if prev is not None and (v - prev) * sign > 0:
+                moved[i] = 1
+            prev = v
+    return list(compress(samples["ts"], moved))
 
 
 def compute_trips(
     positions: list[dict[str, Any]],
-    samples: list[dict[str, Any]],
+    samples: dict[str, list[Any]],
     now: float | None = None,
 ) -> list[dict[str, Any]]:
+    """`samples` is columnar ({"ts": [...], column: [...]}, see
+    History.sample_columns) with at least SAMPLE_COLUMNS."""
     now = now or time.time()
     if len(positions) < 2:
         return []
