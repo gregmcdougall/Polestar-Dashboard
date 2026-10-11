@@ -14,8 +14,9 @@ The browser can't talk to Polestar directly:
 - **Login** is an OIDC/PKCE flow against `polestarid.eu.polestar.com`. It posts the username and
   password to a PingFederate form, follows cross-origin redirects, and reads the auth code from
   a `302 Location` header. CORS and cookie rules block all of that in a browser.
-- **Charging data** (plug status, power, current, voltage, charge limit) comes over native
-  **gRPC** from `cnepmob.volvocars.com` and `api.pccs-prod.plstr.io`, which browsers can't call.
+- **Charging and location data** (plug status, power, current, voltage, charge limit, position)
+  comes over native **gRPC**, which browsers can't call. The servers are Volvo's C3 backend,
+  found via `cnepmob.volvocars.com`, and Polestar's `api.pccs-prod.plstr.io`.
 
 So a thin local Python server (`server/`) does the API work and serves the static HTML/JS
 dashboard (`web/`) plus a small JSON API. By default it binds to `127.0.0.1` only.
@@ -50,7 +51,7 @@ uv run python -m server
 
 Open <http://127.0.0.1:8766>.
 
-Options: `--host` (default `127.0.0.1`), `--port` (default `8766`), `--debug`.
+Options: `--host` (default `127.0.0.1`), `--port` (default `8766`), `--demo`, `--debug`.
 
 Settings in `.env`:
 
@@ -111,18 +112,19 @@ The service stores the project path, so re-run `install` if you move the folder.
 
 ## What it shows
 
-Everything the HA integration exposes as sensors. Distances are shown in miles by default; the
+The same data the HA integration's sensors show. A few of those sensors, such as trip meters
+and average speed, are always empty with the current API, so they're left out. Distances are shown in miles by default; the
 **mi | km** switch in the top bar changes this (remembered per browser). Clicking a tile or chart
 heading collapses it.
 
 | Area | Data | Source |
 |---|---|---|
-| Car | model, model year, registration, VIN, 360° images (drag to rotate) | GraphQL `getConsumerCarsV2`, `getCarImages` |
+| Car | model, model year, registration, VIN, images from 6 angles (drag to rotate) | GraphQL `getConsumerCarsV2`, `getCarImages` |
 | Battery | charge %, est. range, est. full-charge range | GraphQL `carTelematicsV2.battery` |
 | Charging | status, plugged in, AC/DC, power, current, voltage, time to full, ready-at | gRPC `BatteryService/GetLatestBattery` |
 | Charge limit | target SoC and mode (Daily / Long trip / Custom) | gRPC `TargetSocService/GetTargetSoc` |
 | Odometer | total distance | GraphQL `carTelematicsV2.odometer` |
-| Health | days/km to service, service, brake fluid, coolant and oil warnings | GraphQL `carTelematicsV2.health` |
+| Health | days and distance to service, service, brake fluid, coolant and oil warnings | GraphQL `carTelematicsV2.health` |
 | Diagnostics | API connected, status codes, token expiry, data timestamps | pypolestar client state |
 | **Location** | last known + last parked position, live stream | gRPC `dtlinternet.DtlInternetService` (C3), *not part of pypolestar* |
 
@@ -180,8 +182,9 @@ end only" (a dotted line) when no route can be inferred, such as for round trips
 
 Trips are only recorded while the server is running.
 
-Some fields are empty for some models. That's a limitation of Polestar's API, not this app. For
-example, the Polestar 2 isn't provisioned for the charge-limit gRPC service.
+Some fields are empty for some models. That's a limitation of Polestar's API, not this app.
+For example, pypolestar notes that some Polestar 2s aren't set up for the charge-limit service.
+When a service refuses a car, the app stops asking and the field shows "—".
 
 ## Layout
 
@@ -191,7 +194,7 @@ scripts/
 server/
   __main__.py   CLI entry point, loads .env
   app.py        Starlette app: /api/status, /api/cars, /api/history, /api/daily, /api/trips,
-                POST /api/refresh
+                POST /api/refresh; host checking, security headers, trip caching
   poller.py     background loop (HA DataUpdateCoordinator equivalent), backoff, auth-failure stop
   sources.py    LiveSource (pypolestar) mirrors HA coordinator.py, plus location
   location.py   gRPC location client (raw protobuf) + snapshot summary
@@ -210,7 +213,14 @@ web/
 ## Notes
 
 - `backoff` is listed explicitly because pypolestar 1.12.7 imports it without declaring it.
-- Credentials stay in `.env` (git-ignored) and are only sent to Polestar's own endpoints.
+- Credentials stay in `.env` (git-ignored). Your password is only sent to Polestar ID. The
+  access token it returns is used with Polestar's API and with Volvo's C3 backend, which serves
+  Polestar 2 charging and location data.
+- `scripts/service.sh install` makes `.env` and the log file readable only by you (`chmod 600`).
+- Security: the server only answers to its allowed host names (see `DASHBOARD_ALLOWED_HOSTS`),
+  rejects cross-site requests to `POST /api/refresh`, and limits refreshes to one every 15
+  seconds. It also sends a strict Content-Security-Policy and other security headers. Leaflet is
+  loaded with a Subresource Integrity hash, so the page refuses it if the copy on cdnjs changes.
 - `data/` (history databases) is git-ignored. Demo mode rebuilds `data/demo.sqlite3` on each start.
 - Map tiles are loaded from `tile.openstreetmap.org`, which sees the map areas you view (not your
   trip data). Leaflet loads from cdnjs.
