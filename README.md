@@ -28,11 +28,13 @@ Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Try it with simulated data (no account needed):
+Try it with simulated data (no account needed), then open <http://127.0.0.1:8777>:
 
 ```bash
-uv run python -m server --demo
+uv run python -m server --demo --port 8777
 ```
+
+The demo uses its own port so it can run alongside the real dashboard.
 
 Use it with your car:
 
@@ -46,11 +48,18 @@ Edit `.env` with your Polestar ID email and password, then start the server:
 uv run python -m server
 ```
 
-Open <http://127.0.0.1:8765>.
+Open <http://127.0.0.1:8766>.
 
-Options: `--host`, `--port`, `--debug`. Settings in `.env` are `POLESTAR_USERNAME`,
-`POLESTAR_PASSWORD`, an optional `POLESTAR_VIN` (comma-separated), and `POLESTAR_SCAN_INTERVAL`
-in seconds (default 60, minimum 30).
+Options: `--host` (default `127.0.0.1`), `--port` (default `8766`), `--debug`.
+
+Settings in `.env`:
+
+| Setting | Meaning |
+|---|---|
+| `POLESTAR_USERNAME`, `POLESTAR_PASSWORD` | Your Polestar ID login (required) |
+| `POLESTAR_VIN` | Optional: limit to these cars (comma-separated) |
+| `POLESTAR_SCAN_INTERVAL` | Seconds between polls (default 60, minimum 30) |
+| `OSRM_URL` | Routing server for inferred trip routes (default: the public OSRM demo) |
 
 ## Run at startup (macOS)
 
@@ -88,12 +97,15 @@ Remove it:
 scripts/service.sh uninstall
 ```
 
-It serves on port 8766. Set `DASHBOARD_PORT` when running `install` to use a different one.
+It serves on port 8766, the same default as running by hand, so only one of the two can run at
+a time. Set `DASHBOARD_PORT` when running `install` to use a different port.
 The service stores the project path, so re-run `install` if you move the folder.
 
 ## What it shows
 
-Everything the HA integration exposes as sensors:
+Everything the HA integration exposes as sensors. Distances are shown in miles by default; the
+**mi | km** switch in the top bar changes this (remembered per browser). Clicking a tile or chart
+heading collapses it.
 
 | Area | Data | Source |
 |---|---|---|
@@ -121,12 +133,16 @@ position fixes (`positions` table). A trip runs from one stop to the next:
 
 - A stop is somewhere the car stayed within 150 m for 5+ minutes, reported as parked, or went
   quiet for 10+ minutes.
-- Distance comes from the odometer, or the GPS route when no odometer data is available
-  (shown as "≈").
+- The departure time is the start of the run of driving signals (odometer up, battery % or
+  range down) leading up to arrival. Readings in the first 10 minutes after parking are ignored,
+  because the car sends its final odometer value a little late.
+- Distance comes from the odometer, or from the recorded positions when no odometer data is
+  available (shown as "≈").
 - Battery use comes from state-of-charge samples.
 
 Trips are computed on request (`server/trips.py`), so the rules can be tuned without losing
-data. They're shown on an OpenStreetMap map (Leaflet) next to a list grouped by day.
+data. They're shown on an OpenStreetMap map (Leaflet) next to a list grouped by day, for the
+last 7, 30 or 90 days.
 
 Location uses the same undocumented gRPC backend the Polestar app uses, reverse-engineered by
 [unofficial-polestar-api](https://github.com/kildahldev/unofficial-polestar-api). It's called
