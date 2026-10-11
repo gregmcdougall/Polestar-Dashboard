@@ -279,8 +279,7 @@
       if (t.ongoing) bits.unshift("In progress");
       if (!t.ongoing) {
         if (t.route_source === "inferred") {
-          const m = t.route_match;
-          bits.push(m && (m < 0.85 || m > 1.15) ? "approx. route" : "route inferred from mileage");
+          bits.push(t.route_approx ? "approx. route" : "route inferred from mileage");
         } else if (t.route_source === "pending") {
           bits.push("finding route…");
         } else if (straightOnly(t)) {

@@ -176,7 +176,9 @@ class RouteInferrer:
                 t["route_source"] = "inferred"
                 t["route_distance_km"] = round(best["distance"] / 1000, 1)
                 if target_m:
-                    t["route_match"] = round(best["distance"] / target_m, 2)
+                    ratio = best["distance"] / target_m
+                    t["route_match"] = round(ratio, 2)
+                    t["route_approx"] = abs(ratio - 1) > MATCH_TOLERANCE
 
     # ------------------------------------------------------------ worker
 
